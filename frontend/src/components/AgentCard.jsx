@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { MessageSquare, Terminal, Circle, ChevronDown, Clock, Layers, AlertTriangle, Zap } from 'lucide-react'
 
 const STATUS_COLORS = {
@@ -47,7 +47,7 @@ function shortModelName(fullKey) {
   return fullKey
 }
 
-export function AgentCard({ agent, models, onModelChange, onChat, onLogs }) {
+export const AgentCard = memo(function AgentCard({ agent, models, onModelChange, onChat, onLogs }) {
   const [showModelSelect, setShowModelSelect] = useState(false)
   const StatusIcon = STATUS_ICONS[agent.status] || Clock
 
@@ -164,4 +164,4 @@ export function AgentCard({ agent, models, onModelChange, onChat, onLogs }) {
       </div>
     </div>
   )
-}
+})
