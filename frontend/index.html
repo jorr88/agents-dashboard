@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Dashboard</title>
+  </head>
+  <body class="bg-background text-foreground">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+    <!-- Auto-recover from auth expiry: if WS closes with 4001/4002 or fetch gets 401,
+         clear stored token and redirect to login -->
+    <script>
+      const AUTH_KEY = 'dashboard_token';
+      const OrigWS = window.WebSocket;
+      window.WebSocket = function(url, protocols) {
+        const ws = new OrigWS(url, protocols);
+        ws.addEventListener('close', function(e) {
+          if (e.code === 4001 || e.code === 4002) {
+            localStorage.removeItem(AUTH_KEY);
+            window.location.reload();
+          }
+        });
+        return ws;
+      };
+      window.WebSocket.prototype = OrigWS.prototype;
+      const origFetch = window.fetch;
+      window.fetch = function() {
+        return origFetch.apply(this, arguments).then(function(res) {
+          if (res.status === 401) {
+            localStorage.removeItem(AUTH_KEY);
+            window.location.reload();
+          }
+          return res;
+        });
+      };
+    </script>
+  </body>
+</html>

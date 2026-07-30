@@ -1,0 +1,48 @@
+# Agents Dashboard — Docker Compose v3
+# Backend: FastAPI + SQLite + WebSocket + Rate limiting
+# Frontend: React (Vite) servido por nginx con proxy a backend
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: agents-dashboard-backend:v4
+    container_name: dashboard-backend
+    networks:
+      - dashnet
+    ports:
+      - "8000"
+    volumes:
+      - ./data:/app/data
+      - /home/jorr/docker/open-claw/data/config:/home/node/.openclaw:ro
+      - /home/jorr/docker/open-claw/data/workspace:/home/node/.openclaw/workspace:rw
+    environment:
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+      - DASHBOARD_SECRET=${DASHBOARD_SECRET}
+      - DATA_DIR=/app/data
+      - PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: agents-dashboard-frontend:v4
+    container_name: dashboard-frontend
+    networks:
+      - dashnet
+    ports:
+      - "3002:3002"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  dashnet:
+    name: dashboard-net

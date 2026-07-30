@@ -1,0 +1,8 @@
+# secrets
+data/auth.json
+*.bak
+*.pyc
+__pycache__/
+node_modules/
+frontend/dist/
+data/
