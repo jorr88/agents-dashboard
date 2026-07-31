@@ -1,5 +1,5 @@
 // Dashboard v2.1 — multi-user + monthly costs + SQLite
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useWebSocket, useApi, getToken, setToken, clearToken, isAuthenticated, setUserInfo, getUserInfo, setSessionExpiredHandler } from './hooks'
 import { LoginPage } from './components/LoginPage'
 import { AgentCard } from './components/AgentCard'
@@ -8,10 +8,10 @@ import { LogViewer } from './components/LogViewer'
 import { ChangePasswordModal } from './components/ChangePasswordModal'
 import { UsersPanel } from './components/UsersPanel'
 import { CostsPanel } from './components/CostsPanel'
-import { Activity, Terminal, DollarSign, Users, Wifi, WifiOff, RefreshCw, Moon, Sun, LogOut, Key, UserCircle } from 'lucide-react'
+import { Activity, Terminal, DollarSign, Users, Wifi, WifiOff, RefreshCw, Moon, Sun, LogOut, Key, UserCircle, AlertTriangle, X, Search } from 'lucide-react'
 
 export default function App() {
-  const { agents, connected, setAgents } = useWebSocket()
+  const { agents, connected, setAgents, alerts } = useWebSocket()
   const { get, post } = useApi()
   const [models, setModels] = useState([])
   const [activeTab, setActiveTab] = useState('agents')
@@ -27,6 +27,39 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(getUserInfo())
   const [isAdmin, setIsAdmin] = useState(getUserInfo()?.is_admin || false)
   const [usageData, setUsageData] = useState(null)
+  const [toasts, setToasts] = useState([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+
+  // Toast notification handler
+  const addToast = useCallback((message, type = 'info') => {
+    const id = Date.now()
+    setToasts(prev => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 6000)
+  }, [])
+
+  // Load dark mode preference from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('dashboard_darkMode')
+    if (saved !== null) {
+      setDarkMode(saved === 'true')
+    }
+  }, [])
+
+  // Persist dark mode preference
+  useEffect(() => {
+    localStorage.setItem('dashboard_darkMode', String(darkMode))
+  }, [darkMode])
+
+  // Process incoming WebSocket alerts as toasts
+  useEffect(() => {
+    if (alerts.length > 0) {
+      const latest = alerts[alerts.length - 1]
+      addToast(latest.message, latest.alert_type === 'agent_error' ? 'error' : 'warning')
+    }
+  }, [alerts, addToast])
 
   // Handle session expiration from any component
   useEffect(() => {
@@ -81,21 +114,21 @@ export default function App() {
     document.documentElement.classList.toggle('light', !darkMode)
   }, [darkMode])
 
-  const handleModelChange = async (agentId, model) => {
+  const handleModelChange = useCallback(async (agentId, model) => {
     await post(`/agents/${agentId}/model`, { agentId, model })
-  }
+  }, [post])
 
-  const handleOpenChat = (agent) => {
+  const handleOpenChat = useCallback((agent) => {
     setSelectedAgent(agent)
     setShowChat(true)
-  }
+  }, [])
 
-  const handleOpenLogs = (agent) => {
+  const handleOpenLogs = useCallback((agent) => {
     setSelectedAgent(agent)
     setShowLogs(true)
-  }
+  }, [])
 
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setRefreshing(true)
     try {
       const data = await get('/agents')
@@ -106,7 +139,7 @@ export default function App() {
       console.warn('Refresh failed', e)
     }
     setRefreshing(false)
-  }
+  }, [get])
 
   const tabs = [
     { id: 'agents', label: 'Agents', icon: Activity },
@@ -118,6 +151,15 @@ export default function App() {
 
   const runningCount = agents.filter(a => a.status === 'running').length
   const errorCount = agents.filter(a => a.status === 'error').length
+
+  // Filter agents by search query and status
+  const filteredAgents = useMemo(() => {
+    return agents.filter(a => {
+      const matchesSearch = !searchQuery || a.id.toLowerCase().includes(searchQuery.toLowerCase())
+      const matchesStatus = statusFilter === 'all' || a.status === statusFilter
+      return matchesSearch && matchesStatus
+    })
+  }, [agents, searchQuery, statusFilter])
 
   return (
     <>
@@ -192,6 +234,33 @@ export default function App() {
         </div>
       </header>
 
+      {/* Toast notifications */}
+      {toasts.length > 0 && (
+        <div className="fixed top-16 right-4 z-50 space-y-2 max-w-sm">
+          {toasts.map(toast => (
+            <div
+              key={toast.id}
+              className={`animate-slide-up px-4 py-3 rounded-lg shadow-lg border text-sm flex items-start gap-2 ${
+                toast.type === 'error'
+                  ? 'bg-red-400/10 border-red-400/30 text-red-400'
+                  : toast.type === 'warning'
+                  ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-400'
+                  : 'bg-primary/10 border-primary/30 text-primary'
+              }`}
+            >
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{toast.message}</span>
+              <button
+                onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+                className="ml-auto text-current opacity-50 hover:opacity-100"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="max-w-7xl mx-auto px-4 pt-4">
         <div className="flex gap-1 border-b border-border">
@@ -240,9 +309,41 @@ export default function App() {
               </div>
             </div>
 
-            {agents.length > 0 ? (
+            {/* Search & Filter */}
+            <div className="flex items-center gap-3 mb-4">
+              <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Search agents..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-input border border-border rounded-md py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="bg-input border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="all">All Status</option>
+                <option value="running">🟢 Running</option>
+                <option value="idle">🟡 Idle</option>
+                <option value="error">🔴 Error</option>
+              </select>
+            </div>
+
+            {filteredAgents.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {agents.map(agent => (
+                {filteredAgents.map(agent => (
                   <AgentCard
                     key={agent.id}
                     agent={agent}
@@ -256,10 +357,14 @@ export default function App() {
             ) : (
               <div className="text-center py-16 text-muted-foreground">
                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-secondary/50 flex items-center justify-center">
-                  <Activity className="w-8 h-8 opacity-40" />
+                  <Search className="w-8 h-8 opacity-40" />
                 </div>
-                <p className="text-lg font-medium">No agents found</p>
-                <p className="text-sm mt-1">Waiting for data from OpenClaw...</p>
+                <p className="text-lg font-medium">
+                  {agents.length > 0 ? 'No agents match your filters' : 'No agents found'}
+                </p>
+                <p className="text-sm mt-1">
+                  {agents.length > 0 ? 'Try a different search or status filter' : 'Waiting for data from OpenClaw...'}
+                </p>
               </div>
             )}
           </>

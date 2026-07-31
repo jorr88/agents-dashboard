@@ -44,6 +44,7 @@ const API_BASE = '/api'
 export function useWebSocket() {
   const [agents, setAgents] = useState([])
   const [connected, setConnected] = useState(false)
+  const [alerts, setAlerts] = useState([])
 
   useEffect(() => {
     const token = getToken()
@@ -76,6 +77,8 @@ export function useWebSocket() {
           const msg = JSON.parse(event.data)
           if (msg.type === 'agents_update') {
             setAgents(msg.data.agents || [])
+          } else if (msg.type === 'alert') {
+            setAlerts(prev => [...prev, msg])
           }
         } catch (e) {
           // ignore malformed messages
@@ -91,7 +94,7 @@ export function useWebSocket() {
     }
   }, [])
 
-  return { agents, connected, setAgents }
+  return { agents, connected, setAgents, alerts }
 }
 
 export function useApi() {

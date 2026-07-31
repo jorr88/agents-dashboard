@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, memo } from 'react'
 import { useApi } from '../hooks'
-import { DollarSign, TrendingUp, Layers, ArrowUpDown, ArrowUp, ArrowDown, BarChart3, Calendar } from 'lucide-react'
+import { DollarSign, TrendingUp, Layers, ArrowUpDown, ArrowUp, ArrowDown, BarChart3, Calendar, Download } from 'lucide-react'
 
 function formatTokens(n) {
   if (!n) return '0'
@@ -20,6 +20,40 @@ function fmtEur(n) {
   return `€${n.toFixed(2)}`
 }
 
+function exportCSV(sorted, modelUsage) {
+  const headers = ['Agent', 'Model', 'Tokens', 'Sessions', 'Cost (€)']
+  const rows = sorted.map(a => [
+    a.id,
+    shortModelName(a.model),
+    a.total_tokens || 0,
+    a.total_sessions || 0,
+    (a.total_cost_eur || 0).toFixed(2),
+  ])
+  // Add model usage summary rows
+  if (modelUsage?.models) {
+    rows.push([])
+    rows.push([`Month: ${modelUsage.year_month || ''}`, '', '', '', ''])
+    rows.push(['Model', '', 'Tokens', 'Sessions', 'Cost (€)'])
+    for (const m of modelUsage.models) {
+      rows.push([
+        m.model,
+        '',
+        m.total_tokens,
+        m.total_sessions,
+        m.estimated_cost_eur.toFixed(2),
+      ])
+    }
+  }
+  const csv = [headers.join(','), ...rows.map(r => r.map(c => `"${c}"`).join(','))].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `agents-dashboard-costs-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function barColor(pct) {
   if (pct > 80) return 'bg-red-500'
   if (pct > 50) return 'bg-yellow-500'
@@ -35,7 +69,7 @@ const SORT_FIELDS = {
 
 const currentMonthLabel = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
 
-export function CostsPanel({ agents }) {
+export const CostsPanel = memo(function CostsPanel({ agents }) {
   const { get } = useApi()
   const [sortField, setSortField] = useState('cost')
   const [sortDir, setSortDir] = useState('desc')
@@ -78,17 +112,45 @@ export function CostsPanel({ agents }) {
   return (
     <div>
       <div className="mb-6">
-        <h2 className="text-2xl font-bold">Costs &amp; Usage</h2>
-        <div className="flex items-center gap-2 mt-1">
-          <p className="text-sm text-muted-foreground">OpenCode Go — estimated API usage</p>
-          <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium capitalize inline-flex items-center gap-1">
-            <Calendar className="w-3 h-3" />
-            {modelUsage?.year_month
-              ? new Date(modelUsage.year_month + '-01').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
-              : currentMonthLabel}
-          </span>
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-2xl font-bold">Costs &amp; Usage</h2>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-sm text-muted-foreground">OpenCode Go — estimated API usage</p>
+              <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium capitalize inline-flex items-center gap-1">
+                <Calendar className="w-3 h-3" />
+                {modelUsage?.year_month
+                  ? new Date(modelUsage.year_month + '-01').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+                  : currentMonthLabel}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={() => exportCSV(sorted, modelUsage)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-secondary hover:bg-secondary/80 text-foreground rounded-md text-xs font-medium transition-colors"
+            title="Export as CSV"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export CSV
+          </button>
         </div>
       </div>
+
+      {/* Quota alert badge */}
+      {(modelUsage?.quota_pct || 0) > 80 && (
+        <div className="mb-6 p-4 rounded-lg bg-red-400/10 border border-red-400/30 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-red-400/20 flex items-center justify-center flex-shrink-0">
+            <DollarSign className="w-5 h-5 text-red-400" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-red-400">⚠️ Quota Alert — {(modelUsage.quota_pct || 0).toFixed(1)}% consumed!</p>
+            <p className="text-xs text-red-400/70 mt-0.5">
+              {fmtEur(modelUsage.total_cost_eur || 0)} used of {fmtEur(modelUsage.quota_monthly_eur || 55.80)} monthly quota.
+              Only {fmtEur(modelUsage.quota_remaining_eur || 0)} remaining.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
@@ -279,4 +341,4 @@ export function CostsPanel({ agents }) {
       </p>
     </div>
   )
-}
+})

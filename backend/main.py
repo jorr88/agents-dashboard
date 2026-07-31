@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -246,7 +247,11 @@ def openclaw_sessions_json(limit: int = 500) -> dict:
 # ── Snapshot cache (avoids calling openclaw CLI on every HTTP request)
 _cached_snapshot: dict | None = None
 _cached_snapshot_ts: float = 0.0
-SNAPSHOT_CACHE_TTL = 10  # seconds
+SNAPSHOT_CACHE_TTL = 15  # seconds
+
+
+# Track previous agent statuses for failure detection
+_previous_agent_statuses: dict[str, str] = {}
 
 
 def get_snapshot_cached(username: str | None = None) -> dict:
@@ -402,63 +407,72 @@ async def get_agent(agent_id: str, payload: dict = Depends(require_auth)):
             return a
     return {"error": "Agent not found"}
 
+async def _read_logs_async(agent_id: str, lines: int = 50) -> dict:
+    """Read agent logs off the main thread to avoid blocking the event loop."""
+    def _read_sync():
+        agents_dir = STATE_DIR / "agents"
+        agent_dir = None
+        if agents_dir.exists():
+            for d in agents_dir.iterdir():
+                if d.is_dir() and d.name.lower() == agent_id.lower():
+                    agent_dir = d
+                    break
+        if not agent_dir:
+            return {"agent_id": agent_id, "lines": [f"No agent directory found for {agent_id}"]}
+
+        sessions_dir = agent_dir / "sessions"
+        if not sessions_dir.exists():
+            return {"agent_id": agent_id, "lines": [f"No sessions directory for {agent_id}"]}
+
+        jsonl_files = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not jsonl_files:
+            return {"agent_id": agent_id, "lines": [f"No transcript files for {agent_id}"]}
+
+        log_lines = []
+        for jf in jsonl_files[:3]:
+            try:
+                for line in jf.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        msg = obj.get("message") or obj
+                        role = msg.get("role", obj.get("type", "?"))
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            parts = []
+                            for c in content:
+                                if isinstance(c, dict):
+                                    ctype = c.get("type", "")
+                                    if ctype == "text":
+                                        parts.append(c.get("text", ""))
+                                    elif ctype == "toolCall":
+                                        parts.append(f"🔧 {c.get('name','?')}({str(c.get('arguments',{}))[:80]})")
+                                    elif ctype == "toolResult":
+                                        parts.append(f"📋 result ({str(c.get('output',''))[:60]})")
+                                    else:
+                                        parts.append(json.dumps(c)[:100])
+                                else:
+                                    parts.append(str(c))
+                            content = " ".join(parts)
+                        content = str(content)
+                        if content.strip():
+                            log_lines.append(f"[{role}] {content[:250]}")
+                    except json.JSONDecodeError:
+                        log_lines.append(line[:200])
+            except Exception as e:
+                log_lines.append(f"[error reading {jf.name}: {e}]")
+
+        # Use deque to efficiently get last N lines
+        return {"agent_id": agent_id, "lines": list(deque(log_lines, maxlen=lines))}
+
+    return await asyncio.to_thread(_read_sync)
+
+
 @app.get("/api/agents/{agent_id}/logs")
 async def agent_logs(agent_id: str, lines: int = 50, payload: dict = Depends(require_auth)):
-    agents_dir = STATE_DIR / "agents"
-    agent_dir = None
-    if agents_dir.exists():
-        for d in agents_dir.iterdir():
-            if d.is_dir() and d.name.lower() == agent_id.lower():
-                agent_dir = d
-                break
-    if not agent_dir:
-        return {"agent_id": agent_id, "lines": [f"No agent directory found for {agent_id}"]}
-
-    sessions_dir = agent_dir / "sessions"
-    if not sessions_dir.exists():
-        return {"agent_id": agent_id, "lines": [f"No sessions directory for {agent_id}"]}
-
-    jsonl_files = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not jsonl_files:
-        return {"agent_id": agent_id, "lines": [f"No transcript files for {agent_id}"]}
-
-    log_lines = []
-    for jf in jsonl_files[:3]:
-        try:
-            for line in jf.read_text().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    msg = obj.get("message") or obj
-                    role = msg.get("role", obj.get("type", "?"))
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        parts = []
-                        for c in content:
-                            if isinstance(c, dict):
-                                ctype = c.get("type", "")
-                                if ctype == "text":
-                                    parts.append(c.get("text", ""))
-                                elif ctype == "toolCall":
-                                    parts.append(f"🔧 {c.get('name','?')}({str(c.get('arguments',{}))[:80]})")
-                                elif ctype == "toolResult":
-                                    parts.append(f"📋 result ({str(c.get('output',''))[:60]})")
-                                else:
-                                    parts.append(json.dumps(c)[:100])
-                            else:
-                                parts.append(str(c))
-                        content = " ".join(parts)
-                    content = str(content)
-                    if content.strip():
-                        log_lines.append(f"[{role}] {content[:250]}")
-                except json.JSONDecodeError:
-                    log_lines.append(line[:200])
-        except Exception as e:
-            log_lines.append(f"[error reading {jf.name}: {e}]")
-
-    return {"agent_id": agent_id, "lines": log_lines[-lines:]}
+    return await _read_logs_async(agent_id, lines)
 
 @app.post("/api/agents/{agent_id}/model")
 async def set_agent_model(agent_id: str, body: ModelChange, payload: dict = Depends(require_auth)):
@@ -570,10 +584,6 @@ async def get_usage(payload: dict = Depends(require_auth)):
 
     total_cost = round(sum(r["estimated_cost_eur"] for r in results), 4)
 
-    # Save snapshot to DB for history
-    for r in results:
-        save_cost_snapshot(ym, r["model"], r["total_tokens"], r["total_sessions"], r["estimated_cost_eur"])
-
     return {
         "models": results,
         "total_cost_eur": total_cost,
@@ -684,7 +694,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "pong"})
             elif msg.get("type") == "get_logs":
                 aid = msg.get("agentId", "")
-                logs = await agent_logs(aid, msg.get("lines", 50), payload)
+                logs = await _read_logs_async(aid, msg.get("lines", 50))
                 await websocket.send_json({"type": "logs", "agentId": aid, "lines": logs["lines"]})
             elif msg.get("type") == "refresh":
                 snapshot = await get_agents(payload)
@@ -698,7 +708,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # ── Periodic refresh (rebuilds cache + broadcasts to WebSocket clients)
 async def periodic_refresh():
-    global _cached_snapshot, _cached_snapshot_ts
+    global _cached_snapshot, _cached_snapshot_ts, _previous_agent_statuses
     while True:
         await asyncio.sleep(15)
         try:
@@ -706,9 +716,64 @@ async def periodic_refresh():
             sessions_data = openclaw_sessions_json(limit=500)
             sessions = sessions_data.get("sessions", [])
             snapshot = build_agent_snapshot(agents, sessions)
+
+            # Detect agent status changes (running → error)
+            for a in snapshot["agents"]:
+                prev = _previous_agent_statuses.get(a["id"])
+                if prev == "running" and a["status"] == "error":
+                    await manager.broadcast({
+                        "type": "alert",
+                        "alert_type": "agent_error",
+                        "agent_id": a["id"],
+                        "message": f"⚠️ Agent {a['id']} has failed!",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                _previous_agent_statuses[a["id"]] = a["status"]
+
             _cached_snapshot = snapshot
             _cached_snapshot_ts = time.time()
             await manager.broadcast({"type": "agents_update", "data": snapshot})
+
+            # Save cost snapshots to DB (moved from HTTP handler)
+            ym = current_year_month()
+            ym_start = datetime.strptime(ym + "-01", "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            ym_start_ms = int(ym_start.timestamp() * 1000)
+            available = get_available_models()
+            opencode_go_models = {m["model"] for m in available}
+            model_stats: dict = {}
+            for s in sessions:
+                ts = s.get("updatedAt", 0)
+                if ts < ym_start_ms:
+                    continue
+                raw_model = s.get("model", "unknown")
+                model = normalize_model(raw_model)
+                if model not in opencode_go_models:
+                    continue
+                if model not in model_stats:
+                    model_stats[model] = {"total_tokens": 0, "total_sessions": 0}
+                model_stats[model]["total_tokens"] += s.get("totalTokens") or 0
+                model_stats[model]["total_sessions"] += 1
+
+            for model, stats in model_stats.items():
+                cost = estimate_cost_eur(stats["total_tokens"], model)
+                save_cost_snapshot(ym, model, stats["total_tokens"], stats["total_sessions"], cost)
+
+            # Quota alert: >80% usage
+            total_cost = round(sum(
+                estimate_cost_eur(stats["total_tokens"], model)
+                for model, stats in model_stats.items()
+            ), 4)
+            quota_pct = round(total_cost / OPENCODE_GO_MONTHLY_QUOTA * 100, 1)
+            if quota_pct > 80:
+                await manager.broadcast({
+                    "type": "alert",
+                    "alert_type": "quota",
+                    "message": f"⚠️ Monthly cost at {quota_pct}% of quota! ({total_cost:.2f}€ / {OPENCODE_GO_MONTHLY_QUOTA}€)",
+                    "quota_pct": quota_pct,
+                    "total_cost_eur": total_cost,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
         except Exception:
             pass
 

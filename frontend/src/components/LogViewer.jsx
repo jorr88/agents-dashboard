@@ -6,9 +6,9 @@ export function LogViewer({ agent, onClose }) {
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(true)
   const bottomRef = useRef(null)
-  const wsRef = useRef(null)
 
   const fetchLogs = () => {
+    setLoading(true)
     const headers = {}
     const token = getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
@@ -18,49 +18,16 @@ export function LogViewer({ agent, onClose }) {
         setLogs(d.lines || [])
         setLoading(false)
       })
+      .catch(() => setLoading(false))
   }
 
   useEffect(() => {
     fetchLogs()
 
-    const token = getToken()
-    if (!token) return
-
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: 'get_logs',
-        agentId: agent.id,
-        lines: 100,
-      }))
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data)
-        if (msg.type === 'logs' && msg.agentId === agent.id) {
-          setLogs(msg.lines || [])
-          setLoading(false)
-        }
-      } catch (e) {}
-    }
-
-    // Periodic refresh
-    const interval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'get_logs',
-          agentId: agent.id,
-          lines: 100,
-        }))
-      }
-    }, 5000)
+    // Refresh via REST every 5s instead of a second WebSocket
+    const interval = setInterval(fetchLogs, 5000)
 
     return () => {
-      ws.close()
       clearInterval(interval)
     }
   }, [agent.id])
